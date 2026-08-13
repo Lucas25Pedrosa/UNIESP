@@ -1,0 +1,97 @@
+name: Build Feather pt-BR sem card
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-feather-ptbr.yml'
+      - 'feather-ptBR/**'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout deste repositório
+        uses: actions/checkout@v4
+
+      - name: Mostrar versão do Xcode
+        run: xcodebuild -version
+
+      - name: Clonar Feather v2.9.0
+        run: |
+          git clone --branch v2.9.0 --depth 1 --recurse-submodules \
+            https://github.com/claration/Feather.git Feather-src
+          cd Feather-src
+          git submodule update --init --recursive
+          git rev-parse HEAD
+
+      - name: Remover somente o card de doação
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          p = Path('Feather-src/Feather/Views/Settings/SettingsView.swift')
+          s = p.read_text(encoding='utf-8')
+          old = '''\t\t\t\t#if !NIGHTLY && !DEBUG
+\t\t\t\t\tSettingsDonationCellView(site: _donationsUrl)
+\t\t\t\t#endif
+'''
+          if old not in s:
+              raise SystemExit('Bloco SettingsDonationCellView não encontrado; build interrompido por segurança.')
+          s = s.replace(old, '', 1)
+          p.write_text(s, encoding='utf-8')
+          print('Card removido do SettingsView.swift com sucesso.')
+          PY
+
+          if grep -q 'SettingsDonationCellView(site: _donationsUrl)' Feather-src/Feather/Views/Settings/SettingsView.swift; then
+            echo 'ERRO: chamada do card ainda presente.'
+            exit 1
+          fi
+
+      - name: Compilar Feather para iPhone
+        working-directory: Feather-src
+        run: make iphoneos
+
+      - name: Inserir localização pt-BR e reempacotar IPA
+        run: |
+          rm -rf ipa-work
+          mkdir ipa-work
+          cd ipa-work
+          ditto -x -k ../Feather-src/packages/Feather.ipa .
+
+          mkdir -p Payload/Feather.app/pt-BR.lproj
+          cp ../feather-ptBR/pt-BR.lproj/Localizable.strings Payload/Feather.app/pt-BR.lproj/Localizable.strings
+          cp ../feather-ptBR/pt-BR.lproj/Localizable.stringsdict Payload/Feather.app/pt-BR.lproj/Localizable.stringsdict
+
+          plutil -lint Payload/Feather.app/pt-BR.lproj/Localizable.strings
+          plutil -lint Payload/Feather.app/pt-BR.lproj/Localizable.stringsdict
+
+          # Recursos foram alterados; refaz assinatura ad-hoc do app.
+          codesign --force --deep --sign - --timestamp=none Payload/Feather.app
+          codesign --verify --deep --strict Payload/Feather.app
+
+          ditto -c -k --sequesterRsrc --keepParent Payload ../Feather.ipa
+
+      - name: Validar IPA final
+        run: |
+          test -f Feather.ipa
+          unzip -t Feather.ipa >/dev/null
+          unzip -l Feather.ipa | grep 'Payload/Feather.app/pt-BR.lproj/Localizable.strings'
+          unzip -l Feather.ipa | grep 'Payload/Feather.app/pt-BR.lproj/Localizable.stringsdict'
+          echo 'IPA final validado.'
+          ls -lh Feather.ipa
+
+      - name: Publicar Feather.ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: Feather-2.9.0-ptBR-sem-card
+          path: Feather.ipa
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
